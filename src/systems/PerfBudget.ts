@@ -47,7 +47,7 @@ export class PerfBudget {
     if (this.fading.has(p) || p.removed) return;
     this.fading.add(p);
     this.scene.tweens.add({
-      targets: p.sprite,
+      targets: p.sprites,
       alpha: 0,
       duration: PERF.fadeMs,
       onComplete: () => {

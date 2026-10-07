@@ -1,30 +1,46 @@
 import Phaser from 'phaser';
+import { FX, RENDER_SCALE } from '../config/display';
 import { CAMERA, HOUSE_X, VIEW_W, WORLD_W } from '../config/game';
 import { Zombie } from '../entities/Zombie';
 
-/** Auto-pans toward the most threatened side of the house; drag to pan manually. */
+const MIN_SCROLL = 0;
+const MAX_SCROLL = WORLD_W - VIEW_W;
+
+/**
+ * Owns the main camera: renders at device resolution (zoom = RENDER_SCALE with a
+ * top-left origin, so scroll/UI maths stay in 960x640 design pixels), auto-pans
+ * toward the most threatened side with critically-damped spring smoothing, and
+ * hands control to the player's finger when they drag.
+ */
 export class CameraController {
   private cam: Phaser.Cameras.Scene2D.Camera;
   private lastManual = -1e9;
   private panStart: { px: number; scroll: number } | null = null;
-  private moving = false;
+  private vel = 0;
   /** While true (e.g. holding a zombie) auto-pan is paused. */
   hold = false;
 
   constructor(private scene: Phaser.Scene) {
     this.cam = scene.cameras.main;
-    this.cam.setBounds(0, 0, WORLD_W, scene.scale.height);
+    this.cam.setOrigin(0, 0).setZoom(RENDER_SCALE);
     this.cam.scrollX = HOUSE_X - VIEW_W / 2;
+    this.cam.scrollY = 0;
+    if (FX.vignette && this.cam.postFX) this.cam.postFX.addVignette(0.5, 0.5, 0.92, 0.32);
   }
 
-  panStartAt(screenX: number): void {
-    this.panStart = { px: screenX, scroll: this.cam.scrollX };
+  private set scroll(x: number) {
+    this.cam.scrollX = Phaser.Math.Clamp(x, MIN_SCROLL, MAX_SCROLL);
+  }
+
+  panStartAt(canvasX: number): void {
+    this.panStart = { px: canvasX / RENDER_SCALE, scroll: this.cam.scrollX };
+    this.vel = 0;
     this.lastManual = this.scene.time.now;
   }
 
-  panMoveTo(screenX: number): void {
+  panMoveTo(canvasX: number): void {
     if (!this.panStart) return;
-    this.cam.scrollX = this.panStart.scroll - (screenX - this.panStart.px);
+    this.scroll = this.panStart.scroll - (canvasX / RENDER_SCALE - this.panStart.px);
     this.lastManual = this.scene.time.now;
   }
 
@@ -58,9 +74,16 @@ export class CameraController {
       // Keep the house on screen while leaning toward the threat.
       target = Phaser.Math.Clamp(mid - VIEW_W / 2, HOUSE_X - VIEW_W + 130, HOUSE_X - 130);
     }
-    const gap = target - this.cam.scrollX;
-    if (!this.moving && Math.abs(gap) < CAMERA.deadZone) return;
-    this.moving = Math.abs(gap) > 2;
-    this.cam.scrollX += gap * Math.min(1, CAMERA.autoPanRate * (dtMs / 1000));
+    const x = this.cam.scrollX;
+    const gap = target - x;
+    if (Math.abs(gap) < CAMERA.deadZone && Math.abs(this.vel) < 5) {
+      this.vel *= 0.8;
+      return;
+    }
+    // Critically damped spring: eases in and out, never overshoots.
+    const dt = Math.min(dtMs, 50) / 1000;
+    const w = CAMERA.autoPanRate * 2.2;
+    this.vel += (gap * w * w - 2 * w * this.vel) * dt;
+    this.scroll = x + this.vel * dt;
   }
 }

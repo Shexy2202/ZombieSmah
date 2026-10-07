@@ -39,6 +39,7 @@ export class Damage {
     if (ground) {
       const o = oa ?? ob!;
       const z = o.zombie;
+      z.onGroundContact(speed, o.part);
       if (!z.alive || (z.state !== 'AIRBORNE' && z.state !== 'GRABBED')) return;
       const dmg = impactDamage(speed);
       if (dmg <= 0) return;

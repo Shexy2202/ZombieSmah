@@ -1,10 +1,8 @@
 import Phaser from 'phaser';
 import { M } from '../physics/matter';
-import { texRes } from '../assets/art';
 import { CAT, MASK } from '../config/game';
 import { ZOMBIES, ZombieTypeId } from '../config/zombies';
 import { PartDims, partDims } from './partDims';
-
 
 export type PartName = 'head' | 'torso' | 'armBack' | 'armFront' | 'legBack' | 'legFront';
 export type JointKind = 'neck' | 'shoulder' | 'hip';
@@ -12,10 +10,15 @@ export type JointKind = 'neck' | 'shoulder' | 'hip';
 export interface RagdollPart {
   name: PartName;
   body: MatterJS.BodyType;
-  sprite: Phaser.GameObjects.Image;
+  /** Display objects belonging to this part (owned by the rig, faded/destroyed with the part). */
+  sprites: Phaser.GameObjects.Image[];
   /** Constraint to the torso (null for torso or once detached). */
   joint: MatterJS.ConstraintType | null;
   jointKind: JointKind | null;
+  /** Joint anchor on the part, in the part's local frame (fixed at creation). */
+  pivotLocal: { x: number; y: number };
+  /** Joint anchor on the torso, in the torso's local frame. */
+  torsoAnchor: { x: number; y: number };
   /** Soft limit on angle relative to torso while attached. */
   limit: number;
   attached: boolean;
@@ -24,31 +27,19 @@ export interface RagdollPart {
   removed: boolean;
 }
 
-const DEPTH: Record<PartName, number> = {
-  armBack: 0.1, legBack: 0.2, torso: 0.3, legFront: 0.4, head: 0.5, armFront: 0.6,
-};
-
 /**
  * Six-body ragdoll (head, torso, 2 arms, 2 legs) joined by pin constraints.
- * Owns its Matter bodies and the sprites that mirror them.
+ * Physics only: ZombieRig draws it.
  */
 export class Ragdoll {
   readonly parts: RagdollPart[] = [];
   readonly byName = {} as Record<PartName, RagdollPart>;
   readonly dims: PartDims;
   readonly group: number;
-  /** Category/mask currently applied to attached parts. */
   private category: number = CAT.ZOMBIE_WALK;
   private mask: number = MASK.ZOMBIE_WALK;
 
-  constructor(
-    private scene: Phaser.Scene,
-    readonly type: ZombieTypeId,
-    x: number,
-    torsoY: number,
-    facing: 1 | -1,
-    depthBase: number,
-  ) {
+  constructor(private scene: Phaser.Scene, readonly type: ZombieTypeId, x: number, torsoY: number) {
     const def = ZOMBIES[type];
     const d = (this.dims = partDims(type));
     this.group = M.Body.nextGroup(true);
@@ -62,45 +53,33 @@ export class Ragdoll {
       collisionFilter: { group: this.group, category: this.category, mask: this.mask },
     });
 
-    const shoulderY = torsoY - d.torsoH / 2 + d.armW * 0.6;
-    const hipY = torsoY + d.torsoH / 2 - d.legW * 0.5;
-    const neckY = torsoY - d.torsoH / 2;
-
+    const shoulderLocal = -d.torsoH / 2 + d.armW * 0.6;
+    const hipLocal = d.torsoH / 2 - d.legW * 0.5;
     const torso = scene.matter.add.rectangle(x, torsoY, d.torsoW, d.torsoH, { ...common('torso'), chamfer: { radius: d.torsoW * 0.3 } });
-    const head = scene.matter.add.circle(x, neckY - d.headR * 0.8, d.headR, common('head'));
-    const mkArm = (name: PartName) =>
-      scene.matter.add.rectangle(x, shoulderY + d.armH / 2 - d.armW / 2, d.armW, d.armH, { ...common(name), chamfer: { radius: d.armW * 0.45 } });
-    const mkLeg = (name: PartName) =>
-      scene.matter.add.rectangle(x, hipY + d.legH / 2 - d.legW / 2, d.legW, d.legH, { ...common(name), chamfer: { radius: d.legW * 0.4 } });
 
-    const add = (name: PartName, body: MatterJS.BodyType, texPart: string, joint: MatterJS.ConstraintType | null, jointKind: JointKind | null, limit: number) => {
-      const key = `${def.art}_${texPart}`;
-      const sprite = scene.add.image(body.position.x, body.position.y, key);
-      sprite.setScale(1 / texRes(scene, key));
-      sprite.setFlipX(facing < 0);
-      sprite.setDepth(depthBase + DEPTH[name]);
-      if (name === 'armBack' || name === 'legBack') sprite.setTint(0xb8b8c8);
-      const part: RagdollPart = { name, body, sprite, joint, jointKind, limit, attached: true, detachedAt: 0, removed: false };
+    const add = (name: PartName, body: MatterJS.BodyType, jointKind: JointKind | null, torsoLocalY: number, partLocalY: number, limit: number) => {
+      const joint = jointKind
+        ? scene.matter.add.constraint(torso, body, 0, 0.9, { pointA: { x: 0, y: torsoLocalY }, pointB: { x: 0, y: partLocalY }, damping: 0.05 })
+        : null;
+      const part: RagdollPart = {
+        name, body, sprites: [], joint, jointKind, limit,
+        pivotLocal: { x: 0, y: partLocalY }, torsoAnchor: { x: 0, y: torsoLocalY },
+        attached: true, detachedAt: 0, removed: false,
+      };
       this.parts.push(part);
       this.byName[name] = part;
     };
 
-    const pin = (b: MatterJS.BodyType, torsoLocalY: number, partLocalY: number) =>
-      scene.matter.add.constraint(torso, b, 0, 0.9, {
-        pointA: { x: 0, y: torsoLocalY },
-        pointB: { x: 0, y: partLocalY },
-        damping: 0.05,
-      });
-
-    add('torso', torso, 'torso', null, null, 0);
-    add('head', head, 'head', pin(head, -d.torsoH / 2, d.headR * 0.8), 'neck', 0.6);
+    add('torso', torso, null, 0, 0, 0);
+    const head = scene.matter.add.circle(x, torsoY - d.torsoH / 2 - d.headR * 0.8, d.headR, common('head'));
+    add('head', head, 'neck', -d.torsoH / 2, d.headR * 0.8, 0.6);
     for (const name of ['armBack', 'armFront'] as PartName[]) {
-      const b = mkArm(name);
-      add(name, b, 'arm', pin(b, shoulderY - torsoY, -d.armH / 2 + d.armW / 2), 'shoulder', 3.0);
+      const b = scene.matter.add.rectangle(x, torsoY + shoulderLocal + d.armH / 2 - d.armW / 2, d.armW, d.armH, { ...common(name), chamfer: { radius: d.armW * 0.45 } });
+      add(name, b, 'shoulder', shoulderLocal, -d.armH / 2 + d.armW / 2, 3.0);
     }
     for (const name of ['legBack', 'legFront'] as PartName[]) {
-      const b = mkLeg(name);
-      add(name, b, 'leg', pin(b, hipY - torsoY, -d.legH / 2 + d.legW / 2), 'hip', 1.7);
+      const b = scene.matter.add.rectangle(x, torsoY + hipLocal + d.legH / 2 - d.legW / 2, d.legW, d.legH, { ...common(name), chamfer: { radius: d.legW * 0.4 } });
+      add(name, b, 'hip', hipLocal, -d.legH / 2 + d.legW / 2, 1.7);
     }
   }
 
@@ -108,12 +87,21 @@ export class Ragdoll {
     return this.byName.torso.body;
   }
 
-  /** World position of a part's joint anchor on the torso. */
-  jointWorldPos(part: RagdollPart): Phaser.Math.Vector2 {
-    if (!part.joint) return new Phaser.Math.Vector2(part.body.position.x, part.body.position.y);
-    const t = this.torso;
-    const p = part.joint.pointA;
-    return new Phaser.Math.Vector2(t.position.x + p.x, t.position.y + p.y);
+  /** World position of a point given in a body's local (unrotated) frame. */
+  static worldOf(body: MatterJS.BodyType, local: { x: number; y: number }): { x: number; y: number } {
+    const c = Math.cos(body.angle), s = Math.sin(body.angle);
+    return { x: body.position.x + local.x * c - local.y * s, y: body.position.y + local.x * s + local.y * c };
+  }
+
+  /** World position of a part's joint pivot (where it attaches / attached to the torso). */
+  pivotWorld(part: RagdollPart): { x: number; y: number } {
+    return Ragdoll.worldOf(part.body, part.pivotLocal);
+  }
+
+  /** World position of a part's anchor on the torso. */
+  anchorWorld(part: RagdollPart): Phaser.Math.Vector2 {
+    const p = Ragdoll.worldOf(this.torso, part.torsoAnchor);
+    return new Phaser.Math.Vector2(p.x, p.y);
   }
 
   setCollision(category: number, mask: number): void {
@@ -154,21 +142,14 @@ export class Ragdoll {
     }
   }
 
-  sync(): void {
-    for (const p of this.parts) {
-      if (p.removed) continue;
-      p.sprite.setPosition(p.body.position.x, p.body.position.y);
-      p.sprite.setRotation(p.body.angle);
-    }
-  }
-
   removePart(p: RagdollPart): void {
     if (p.removed) return;
     p.removed = true;
     if (p.joint) this.scene.matter.world.removeConstraint(p.joint);
     p.joint = null;
     this.scene.matter.world.remove(p.body);
-    p.sprite.destroy();
+    for (const s of p.sprites) s.destroy();
+    p.sprites.length = 0;
   }
 
   destroy(): void {

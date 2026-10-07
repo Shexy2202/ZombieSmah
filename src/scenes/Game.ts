@@ -3,6 +3,8 @@ import { M } from '../physics/matter';
 import { HOUSE_X, VIEW_W } from '../config/game';
 import { ZombieTypeId } from '../config/zombies';
 import { Zombie, ZombieHost } from '../entities/Zombie';
+import { RagdollPart } from '../entities/Ragdoll';
+import { RENDER_SCALE } from '../config/display';
 import { Damage } from '../systems/Damage';
 import { FlickInput } from '../systems/FlickInput';
 import { Fx } from '../systems/Fx';
@@ -20,6 +22,8 @@ export class Game extends Phaser.Scene implements ZombieHost {
   private zombies: Zombie[] = [];
   private backdrop!: Backdrop;
   private house!: House;
+  private ground!: Ground;
+  private hint!: Phaser.GameObjects.Text;
   private decals!: DecalLayer;
   private fx!: Fx;
   private camCtl!: CameraController;
@@ -40,7 +44,7 @@ export class Game extends Phaser.Scene implements ZombieHost {
     this.zombies = [];
     this.backdrop = new Backdrop(this);
     this.house = new House(this);
-    new Ground(this);
+    this.ground = new Ground(this);
     this.decals = new DecalLayer(this);
     this.fx = new Fx(this, this.decals);
     this.camCtl = new CameraController(this);
@@ -66,11 +70,11 @@ export class Game extends Phaser.Scene implements ZombieHost {
       for (const z of this.zombies) z.physicsStep(STEP_MS);
     });
 
-    this.info = this.add.text(12, 10, '', { fontFamily: 'monospace', fontSize: '14px', color: '#e8f0ff' })
+    this.info = this.add.text(12, 10, '', { fontFamily: 'monospace', fontSize: '14px', color: '#e8f0ff', resolution: RENDER_SCALE })
       .setScrollFactor(0).setDepth(100).setShadow(1, 1, '#000', 2);
-    this.add.text(VIEW_W / 2, 610, 'Drag a zombie and let go to fling it. Drag empty space to pan.', {
-      fontFamily: 'sans-serif', fontSize: '15px', color: '#c8d8ee',
-    }).setOrigin(0.5).setScrollFactor(0).setDepth(100).setAlpha(0.8);
+    this.hint = this.add.text(VIEW_W / 2, 606, 'Drag a zombie and let go to fling it  ·  Drag empty space to look around', {
+      fontFamily: 'Trebuchet MS, sans-serif', fontSize: '16px', color: '#dfe9f7', resolution: RENDER_SCALE,
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(100).setAlpha(0.85).setShadow(0, 2, '#000', 4);
 
     // Milestone (a) test spawner: a couple of walkers at a time from both sides.
     for (const side of [1, -1] as const) this.spawn('walker', side);
@@ -87,9 +91,13 @@ export class Game extends Phaser.Scene implements ZombieHost {
   update(_time: number, delta: number): void {
     this.flick.update();
     this.camCtl.hold = this.flick.grabbing;
+    if (this.flick.grabbing && this.hint.alpha > 0.84) {
+      this.tweens.add({ targets: this.hint, alpha: 0, duration: 600, delay: 1200 });
+    }
+    this.ground.update(delta);
     this.backdrop.update(delta);
     this.house.update(delta);
-    for (const z of this.zombies) z.render();
+    for (const z of this.zombies) z.render(delta);
     this.zombies = this.perf.update(this.zombies);
     this.camCtl.update(delta, this.zombies);
 
@@ -115,8 +123,18 @@ export class Game extends Phaser.Scene implements ZombieHost {
     this.fx.shake(intensity, ms);
   }
 
+  bloodSpurt(z: Zombie, part: RagdollPart): void {
+    this.fx.bloodSpurt(z.rag, part);
+  }
+
+  hitStop(ms: number): void {
+    this.fx.hitStop(ms);
+  }
+
   onZombieKilled(): void {
     this.kills++;
+    this.fx.hitStop(55);
+    this.fx.shake(0.006, 140);
   }
 
   onHouseDamage(_z: Zombie, amount: number): void {
